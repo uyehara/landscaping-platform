@@ -1,0 +1,162 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with pgvector extension
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: landscaping-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-landscape}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-landscaping}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init-scripts:/docker-entrypoint-initdb.d:ro
+    networks:
+      - landscaping-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-landscape}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO S3-compatible storage
+  minio:
+    image: minio/minio:latest
+    container_name: landscaping-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console
+    volumes:
+      - minio_data:/data
+    networks:
+      - landscaping-net
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Create MinIO buckets on startup
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
+      mc mb local/landscaping-assets --ignore-existing;
+      mc anonymous set download local/landscaping-assets;
+      exit 0;
+      "
+    networks:
+      - landscaping-net
+
+  # Fastify API Gateway
+  api-gateway:
+    build:
+      context: ./packages/api-gateway
+      dockerfile: Dockerfile
+    container_name: landscaping-api-gateway
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: ${API_GATEWAY_PORT:-3001}
+      DATABASE_URL: postgres://${POSTGRES_USER:-landscape}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-landscaping}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: landscaping-assets
+      AI_SERVICE_URL: http://ai-service:8000
+      COLLABORATION_URL: ws://collaboration:1234
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      JWT_SECRET: ${JWT_SECRET:-your-secret-key-change-in-production}
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - landscaping-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # SvelteKit Frontend
+  frontend:
+    build:
+      context: ./packages/frontend
+      dockerfile: Dockerfile
+    container_name: landscaping-frontend
+    environment:
+      PUBLIC_API_URL: http://localhost:3001
+      PUBLIC_COLLABORATION_URL: ws://localhost:1234
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api-gateway
+    networks:
+      - landscaping-net
+    # For development, mount source volume
+    volumes:
+      - ./packages/frontend:/app
+      - /app/node_modules
+
+  # Python AI Service
+  ai-service:
+    build:
+      context: ./packages/ai-service
+      dockerfile: Dockerfile
+    container_name: landscaping-ai-service
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-landscape}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-landscaping}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - landscaping-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Hocuspocus Collaboration Server
+  collaboration:
+    build:
+      context: ./packages/collaboration
+      dockerfile: Dockerfile
+    container_name: landscaping-collaboration
+    environment:
+      PORT: 1234
+      DB_TYPE: memory  # MVP: in-memory, switch to 'database' for Postgres persistence
+      DB_URL: postgres://${POSTGRES_USER:-landscape}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-landscaping}
+      JWT_SECRET: ${JWT_SECRET:-your-secret-key-change-in-production}
+    ports:
+      - "1234:1234"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - landscaping-net
+
+networks:
+  landscaping-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  minio_data:
