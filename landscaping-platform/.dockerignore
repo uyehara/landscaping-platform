@@ -1,0 +1,28 @@
+# Re-include patterns for Docker build context
+# Override parent .dockerignore exclusions
+
+# Allow all files in packages subdirectories
+packages/**
+!packages/*/package*.json
+!packages/*/src/**
+!packages/*/tsconfig.json
+!packages/*/vite.config.ts
+!packages/*/svelte.config.js
+!packages/*/tailwind.config.js
+
+# Allow postgres init scripts
+postgres/**
+
+# Allow minio data dir marker
+minio/**
+
+# Allow root level config files
+!docker-compose.yml
+!.env*
+
+# Standard excludes for built artifacts
+**/node_modules
+**/dist
+**/build
+**/.svelte-kit
+**/__pycache__
